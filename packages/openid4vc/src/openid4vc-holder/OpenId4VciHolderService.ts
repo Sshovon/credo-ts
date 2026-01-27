@@ -31,6 +31,7 @@ import {
 } from '@credo-ts/core'
 import {
   type AccessTokenResponse,
+  type AuthorizationErrorResponse,
   authorizationCodeGrantIdentifier,
   type CallbackContext,
   clientAuthenticationAnonymous,
@@ -39,6 +40,7 @@ import {
   getAuthorizationServerMetadataFromList,
   type Jwk,
   Oauth2Client,
+  Oauth2ServerErrorResponseError,
   preAuthorizedCodeGrantIdentifier,
   type RequestDpopOptions,
   refreshTokenGrantIdentifier,
@@ -50,8 +52,8 @@ import {
   determineAuthorizationServerForCredentialOffer,
   type IssuerMetadataResult,
   Openid4vciClient,
-  Openid4vciDraftVersion,
   Openid4vciRetrieveCredentialsError,
+  Openid4vciVersion,
   parseKeyAttestationJwt,
 } from '@openid4vc/openid4vci'
 import type { OpenId4VciCredentialConfigurationSupportedWithFormats, OpenId4VciMetadata } from '../shared'
@@ -76,6 +78,7 @@ import type {
   OpenId4VciSupportedCredentialFormats,
   OpenId4VciTokenRefreshOptions,
   OpenId4VciTokenRequestOptions,
+  OpenId4VcParseAndVerifyAuthorizationResponseOptions,
 } from './OpenId4VciHolderServiceOptions'
 import { openId4VciSupportedCredentialFormats } from './OpenId4VciHolderServiceOptions'
 
@@ -335,6 +338,33 @@ export class OpenId4VciHolderService {
     }
   }
 
+  public parseAuthorizationCodeFromAuthorizationResponse(
+    agentContext: AgentContext,
+    options: OpenId4VcParseAndVerifyAuthorizationResponseOptions
+  ) {
+    const { metadata, credentialOfferPayload } = options.resolvedCredentialOffer
+    const client = this.getClient(agentContext)
+
+    const authorizationServer = credentialOfferPayload.grants?.authorization_code?.authorization_server
+    const authorizationServerMetadata = getAuthorizationServerMetadataFromList(
+      metadata.authorizationServers,
+      authorizationServer ?? metadata.authorizationServers[0].issuer
+    )
+
+    const authorizationResponse = client.parseAndVerifyAuthorizationResponseRedirectUrl({
+      authorizationServerMetadata,
+      url: options.authorizationResponseRedirectUrl,
+    })
+
+    if (!authorizationResponse.code) {
+      throw new Oauth2ServerErrorResponseError(authorizationResponse as AuthorizationErrorResponse, {
+        internalMessage: 'Error response received from the authorization server',
+      })
+    }
+
+    return { authorizationCode: authorizationResponse.code }
+  }
+
   public async requestAccessToken(
     agentContext: AgentContext,
     options: OpenId4VciTokenRequestOptions
@@ -547,9 +577,9 @@ export class OpenId4VciHolderService {
 
       const proof =
         // Draft 11 ALWAYS uses proof
-        (metadata.originalDraftVersion === Openid4vciDraftVersion.Draft11 ||
+        (metadata.originalDraftVersion === Openid4vciVersion.Draft11 ||
           // Draft 14 allows both proof and proofs. Try to use proof when it makes to improve interoperability
-          (metadata.originalDraftVersion === Openid4vciDraftVersion.Draft14 &&
+          (metadata.originalDraftVersion === Openid4vciVersion.Draft14 &&
             metadata.credentialIssuer.batch_credential_issuance === undefined)) &&
         proofs.jwt?.length === 1
           ? ({
@@ -1070,9 +1100,9 @@ export class OpenId4VciHolderService {
     let proofTypesSupported = configuration.proof_types_supported
     if (!proofTypesSupported) {
       // For draft above 11 we do not allow no proof_type (we do not support no key binding for now)
-      if (metadata.originalDraftVersion !== Openid4vciDraftVersion.Draft11) {
+      if (metadata.originalDraftVersion !== Openid4vciVersion.Draft11) {
         throw new CredoError(
-          `Credential configuration '${configurationId}' does not specifcy proof_types_supported. Credentials not bound to keys are not supported at the moment`
+          `Credential configuration '${configurationId}' does not specify proof_types_supported. Credentials not bound to keys are not supported at the moment`
         )
       }
 
@@ -1205,13 +1235,28 @@ export class OpenId4VciHolderService {
       if (format === OpenId4VciCredentialFormatProfile.SdJwtDc || credentialConfiguration.vct) {
         const sdJwtVcApi = agentContext.dependencyManager.resolve(SdJwtVcApi)
         const verificationResults = await Promise.all(
-          credentials.map((compactSdJwtVc, index) =>
-            sdJwtVcApi.verify({
+          credentials.map(async (compactSdJwtVc, index) => {
+            const result = await sdJwtVcApi.verify({
               compactSdJwtVc,
               // Only load and verify it for the first instance
               fetchTypeMetadata: index === 0,
             })
-          )
+
+            // Link key id with credential
+            if (result.sdJwtVc?.holder?.method === 'jwk') {
+              const jwkThumbprint = TypedArrayEncoder.toBase64(result.sdJwtVc.holder.jwk.getJwkThumbprint())
+              const kmsKeyId = options.jwkThumbprintKmsKeyIdMapping?.[jwkThumbprint]
+              if (!kmsKeyId) {
+                throw new CredoError(
+                  `Missing kmsKeyId for jwk with thumbprint ${jwkThumbprint}. A credential was issued for a key that was not in the credential request.`
+                )
+              }
+
+              result.sdJwtVc.kmsKeyId = kmsKeyId
+            }
+
+            return result
+          })
         )
 
         if (!verificationResults.every((result) => result.isValid)) {
@@ -1387,10 +1432,10 @@ export class OpenId4VciHolderService {
             )
           }
 
+          mdoc.deviceKeyId = kmsKeyId
           return {
             result,
             mdoc,
-            kmsKeyId,
           }
         })
       )
@@ -1409,7 +1454,7 @@ export class OpenId4VciHolderService {
         record: new MdocRecord({
           credentialInstances: result.map((c) => ({
             issuerSignedBase64Url: c.mdoc.base64Url,
-            kmsKeyId: c.kmsKeyId,
+            kmsKeyId: c.mdoc.deviceKeyId,
           })) as MdocRecordInstances,
         }),
         notificationId,
