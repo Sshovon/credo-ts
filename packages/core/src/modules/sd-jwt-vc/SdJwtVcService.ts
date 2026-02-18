@@ -6,7 +6,7 @@ import { SDJwtVcInstance, type VcTFetcher } from '@sd-jwt/sd-jwt-vc'
 import type { DisclosureFrame, PresentationFrame } from '@sd-jwt/types'
 import { injectable } from 'tsyringe'
 import { AgentContext } from '../../agent'
-import { Hasher, JwtPayload } from '../../crypto'
+import { Hasher, JwsService, Jwt, JwtPayload } from '../../crypto'
 import { CredoError } from '../../error'
 import { X509Service } from '../../modules/x509/X509Service'
 import type { Query, QueryOptions } from '../../storage/StorageService'
@@ -15,7 +15,7 @@ import { dateToSeconds, IntegrityVerifier, nowInSeconds, TypedArrayEncoder } fro
 import { getDomainFromUrl } from '../../utils/domain'
 import { fetchWithTimeout } from '../../utils/fetch'
 import { getPublicJwkFromVerificationMethod, parseDid } from '../dids'
-import { KeyManagementApi, PublicJwk } from '../kms'
+import { KeyManagementApi, PublicJwk, type Jwk } from '../kms'
 import { ClaimFormat } from '../vc/index'
 import { type EncodedX509Certificate, X509Certificate, X509ModuleConfig } from '../x509'
 import { decodeSdJwtVc, sdJwtVcHasher } from './decodeSdJwtVc'
@@ -647,6 +647,42 @@ export class SdJwtVcService {
       hasher: sdJwtVcHasher,
       statusListFetcher: this.getStatusListFetcher(agentContext),
       saltGenerator: (length) => TypedArrayEncoder.toBase64URL(kms.randomBytes({ length })).slice(0, length),
+      statusVerifier: this.getStatusVerifier(agentContext),
+    }
+  }
+
+  private getStatusVerifier(agentContext: AgentContext) {
+    return async (data: string, sig: string) => {
+      const jwt = Jwt.fromSerializedJwt(`${data}.${sig}`)
+      const payload = jwt.payload
+      const jwksResponse = await fetchWithTimeout(
+        agentContext.config.agentDependencies.fetch,
+        `${payload.iss}/.well-known/jwks.json`
+      )
+      if (!jwksResponse.ok) {
+        agentContext.config.logger.error(
+          `Received invalid response with status ${
+            jwksResponse.status
+          } when fetching JWKS from ${payload.iss}/.well-known/jwks.json. ${await jwksResponse.text()}`
+        )
+        return false
+      }
+      const jwks = (await jwksResponse.json()) as Record<'keys', Jwk[]>
+      // TODO: we can check all keys against the signature incase kid is not present in the header
+      const signingJwk = jwks.keys.find((jwk) => jwk.kid === jwt.header.kid)
+      if (!signingJwk) {
+        agentContext.config.logger.error(`No JWK found for kid ${jwt.header.kid} in JWKS from ${payload.iss}/.well-known/jwks.json`)
+        return false
+      }
+      const { isValid } = await agentContext.resolve(JwsService).verifyJws(agentContext, {
+        jws: jwt.serializedJwt,
+        jwsSigner: {
+          method: 'jwk',
+          jwk: PublicJwk.fromUnknown(signingJwk),
+        },
+      })
+      agentContext.config.logger.debug(`Status list provider JWT signature verification result: ${isValid}`)
+      return isValid
     }
   }
 
