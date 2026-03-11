@@ -11,6 +11,8 @@ import {
   W3cCredentialRecord,
   W3cV2CredentialRecord,
   X509Module,
+  ConsoleLogger,
+  LogLevel,
 } from '@credo-ts/core'
 import type {
   OpenId4VciDpopRequestOptions,
@@ -39,8 +41,7 @@ function getOpenIdHolderModules(askarStorageConfig: AskarModuleConfigStoreOption
       getTrustedCertificatesForVerification: (_agentContext, { certificateChain, verification }) => {
         console.log(
           greenText(
-            `dynamically trusting certificate ${certificateChain[0].getIssuerNameField('C')} for verification of ${
-              verification.type
+            `dynamically trusting certificate ${certificateChain[0].getIssuerNameField('C')} for verification of ${verification.type
             }`,
             true
           )
@@ -67,6 +68,9 @@ export class Holder extends BaseAgent<ReturnType<ReturnType<typeof getOpenIdHold
         key: name,
       }),
     })
+
+    // enable console logger for this agent
+    this.agent.config.logger = new ConsoleLogger(LogLevel.debug)
   }
 
   public static async build(): Promise<Holder> {
@@ -77,11 +81,15 @@ export class Holder extends BaseAgent<ReturnType<ReturnType<typeof getOpenIdHold
   }
 
   public async resolveCredentialOffer(credentialOffer: string) {
-    return await this.agent.openid4vc.holder.resolveCredentialOffer(credentialOffer)
+    const resolvedCredentialOffer = await this.agent.openid4vc.holder.resolveCredentialOffer(credentialOffer)
+    console.log(JSON.stringify(resolvedCredentialOffer, null, 2))
+    return resolvedCredentialOffer
   }
 
   public async resolveIssuerMetadata(credentialIssuer: string): Promise<OpenId4VciMetadata> {
-    return await this.agent.openid4vc.holder.resolveIssuerMetadata(credentialIssuer)
+    const resolvedIssuerMetadata = await this.agent.openid4vc.holder.resolveIssuerMetadata(credentialIssuer)
+    // console.log(JSON.stringify(resolvedIssuerMetadata, null, 2))
+    return resolvedIssuerMetadata
   }
 
   public async initiateAuthorization(
@@ -135,9 +143,10 @@ export class Holder extends BaseAgent<ReturnType<ReturnType<typeof getOpenIdHold
       dpop?: OpenId4VciDpopRequestOptions
     }
   ) {
-    const tokenResponse = await this.agent.openid4vc.holder.requestToken(
-      options.code && options.clientId
-        ? {
+    try{
+      const tokenResponse = await this.agent.openid4vc.holder.requestToken(
+        options.code && options.clientId
+          ? {
             resolvedCredentialOffer,
             clientId: options.clientId,
             codeVerifier: options.codeVerifier,
@@ -145,85 +154,99 @@ export class Holder extends BaseAgent<ReturnType<ReturnType<typeof getOpenIdHold
             redirectUri: options.redirectUri,
             dpop: options.dpop,
           }
-        : {
+          : {
             resolvedCredentialOffer,
             txCode: options.txCode,
             dpop: options.dpop,
           }
-    )
-
-    const credentialResponse = await this.agent.openid4vc.holder.requestCredentials({
-      resolvedCredentialOffer,
-      clientId: options.clientId,
-      credentialConfigurationIds: options.credentialsToRequest,
-      credentialBindingResolver: async ({ supportedDidMethods, supportsAllDidMethods, proofTypes }) => {
-        const key = await this.agent.kms.createKeyForSignatureAlgorithm({
-          algorithm: proofTypes.jwt?.supportedSignatureAlgorithms[0] ?? 'EdDSA',
-        })
-        const publicJwk = Kms.PublicJwk.fromPublicJwk(key.publicJwk)
-
-        if (supportsAllDidMethods || supportedDidMethods?.includes('did:key')) {
-          await this.agent.dids.create<KeyDidCreateOptions>({
-            method: 'key',
-            options: {
-              keyId: key.keyId,
-            },
+      )
+  
+      const credentialResponse = await this.agent.openid4vc.holder.requestCredentials({
+        resolvedCredentialOffer,
+        clientId: options.clientId,
+        credentialConfigurationIds: options.credentialsToRequest,
+        credentialBindingResolver: async ({ supportedDidMethods, supportsAllDidMethods, proofTypes }) => {
+          const key = await this.agent.kms.createKeyForSignatureAlgorithm({
+            algorithm: proofTypes.jwt?.supportedSignatureAlgorithms[0] ?? 'ES256',
           })
-          const didKey = new DidKey(publicJwk)
-
+          const publicJwk = Kms.PublicJwk.fromPublicJwk(key.publicJwk)
+  
+          // if (supportedDidMethods?.includes('did:jwk')) {
+          //   console.log('using did:jwk holder binding')
+          //   const didJwk = DidJwk.fromPublicJwk(publicJwk)
+          //   await this.agent.dids.create<JwkDidCreateOptions>({
+          //     method: 'jwk',
+          //     options: {
+          //       keyId: key.keyId,
+          //     },
+          //   })
+  
+          //   return {
+          //     method: 'did',
+          //     didUrls: [`${didJwk.did}#0`],
+          //   }
+          // }
+  
+          // if (supportsAllDidMethods || supportedDidMethods?.includes('did:key')) {
+          //   console.log('using did:key holder binding')
+          //   await this.agent.dids.create<KeyDidCreateOptions>({
+          //     method: 'key',
+          //     options: {
+          //       keyId: key.keyId,
+          //     },
+          //   })
+          //   const didKey = new DidKey(publicJwk)
+  
+          //   return {
+          //     method: 'did',
+          //     didUrls: [`${didKey.did}#${didKey.publicJwk.fingerprint}`],
+          //   }
+          // }
+  
+  
+          // We fall back on jwk binding
+          console.log('using jwk holder binding')
           return {
-            method: 'did',
-            didUrls: [`${didKey.did}#${didKey.publicJwk.fingerprint}`],
-          }
-        }
-        if (supportedDidMethods?.includes('did:jwk')) {
-          const didJwk = DidJwk.fromPublicJwk(publicJwk)
-          await this.agent.dids.create<JwkDidCreateOptions>({
             method: 'jwk',
-            options: {
-              keyId: key.keyId,
-            },
-          })
-
-          return {
-            method: 'did',
-            didUrls: [`${didJwk.did}#0`],
+            keys: [publicJwk],
           }
-        }
-
-        // We fall back on jwk binding
-        return {
-          method: 'jwk',
-          keys: [publicJwk],
-        }
-      },
-      ...tokenResponse,
-    })
-
-    const storedCredentials = await Promise.all(
-      credentialResponse.credentials.map((credential) => {
-        if (credential.record instanceof W3cCredentialRecord) {
-          return this.agent.w3cCredentials.store({ record: credential.record })
-        }
-        if (credential.record instanceof W3cV2CredentialRecord) {
-          return this.agent.w3cV2Credentials.store({ record: credential.record })
-        }
-        if (credential.record instanceof MdocRecord) {
-          return this.agent.mdoc.store({ record: credential.record })
-        }
-        return this.agent.sdJwtVc.store({
-          record: credential.record,
-        })
+  
+        },
+        ...tokenResponse,
       })
-    )
-
-    return storedCredentials
+  
+      const storedCredentials = await Promise.all(
+        credentialResponse.credentials.map((credential) => {
+          if (credential.record instanceof W3cCredentialRecord) {
+            return this.agent.w3cCredentials.store({ record: credential.record })
+          }
+          if (credential.record instanceof W3cV2CredentialRecord) {
+            return this.agent.w3cV2Credentials.store({ record: credential.record })
+          }
+          if (credential.record instanceof MdocRecord) {
+            return this.agent.mdoc.store({ record: credential.record })
+          }
+          return this.agent.sdJwtVc.store({
+            record: credential.record,
+          })
+        })
+      )
+  
+      return storedCredentials
+    }catch(error) {
+      console.error(error)
+    }
   }
 
   public async resolveProofRequest(proofRequest: string) {
-    const resolvedProofRequest = await this.agent.openid4vc.holder.resolveOpenId4VpAuthorizationRequest(proofRequest)
-
-    return resolvedProofRequest
+    try {
+      const resolvedProofRequest = await this.agent.openid4vc.holder.resolveOpenId4VpAuthorizationRequest(proofRequest)
+      console.log(JSON.stringify(resolvedProofRequest, null, 2))
+      return resolvedProofRequest
+    }
+    catch (error) {
+      console.error(error)
+    }
   }
 
   public async acceptPresentationRequest(resolvedPresentationRequest: OpenId4VpResolvedAuthorizationRequest) {
@@ -235,17 +258,17 @@ export class Holder extends BaseAgent<ReturnType<ReturnType<typeof getOpenIdHold
       authorizationRequestPayload: resolvedPresentationRequest.authorizationRequestPayload,
       presentationExchange: resolvedPresentationRequest.presentationExchange
         ? {
-            credentials: this.agent.openid4vc.holder.selectCredentialsForPresentationExchangeRequest(
-              resolvedPresentationRequest.presentationExchange.credentialsForRequest
-            ),
-          }
+          credentials: this.agent.openid4vc.holder.selectCredentialsForPresentationExchangeRequest(
+            resolvedPresentationRequest.presentationExchange.credentialsForRequest
+          ),
+        }
         : undefined,
       dcql: resolvedPresentationRequest.dcql
         ? {
-            credentials: this.agent.openid4vc.holder.selectCredentialsForDcqlRequest(
-              resolvedPresentationRequest.dcql.queryResult
-            ),
-          }
+          credentials: this.agent.openid4vc.holder.selectCredentialsForDcqlRequest(
+            resolvedPresentationRequest.dcql.queryResult
+          ),
+        }
         : undefined,
     })
     return submissionResult

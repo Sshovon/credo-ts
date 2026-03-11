@@ -2,32 +2,41 @@ import { clear } from 'console'
 import figlet from 'figlet'
 
 import { BaseInquirer } from './BaseInquirer'
-import { credentialConfigurationsSupported, GOOGLE_ENABLED, Issuer } from './Issuer'
+// import { credentialConfigurationsSupported, GOOGLE_ENABLED  } from './Issuer'
+import { credentialConfigurationsSupported, GOOGLE_ENABLED, pidPex, verificationDcql, verificationDcqlSdjwt } from './diip'
 import { greenText, purpleText, redText, Title } from './OutputClass'
+import { Issuer } from './Issuer'
+import { Diip } from './diip'
 
 export const runIssuer = async () => {
   clear()
   console.log(figlet.textSync('Issuer', { horizontalLayout: 'full' }))
   const issuer = await IssuerInquirer.build()
+  // await issuer.createStartupCredentialOffer()
+  // await issuer.createStartupVerificationRequestMdoc()
+  // await issuer.createStartupVerificationRequestSdjwt()
   await issuer.processAnswer()
 }
 
 enum PromptOptions {
   CreateCredentialOffer = 'Create a credential offer',
+  CreateVerificationRequestMdoc = 'Create a verification request (MDOC)',
+  CreateVerificationRequestSdjwt = 'Create a verification request (SDJWT)',
+  CreateVerificationRequestMdocPex = 'Create a verification request (PID PEx)',
   Exit = 'Exit',
   Restart = 'Restart',
 }
 
 export class IssuerInquirer extends BaseInquirer {
-  public issuer: Issuer
+  public issuer: Issuer | Diip
 
-  public constructor(issuer: Issuer) {
+  public constructor(issuer: Issuer | Diip) {
     super()
     this.issuer = issuer
   }
 
   public static async build(): Promise<IssuerInquirer> {
-    const issuer = await Issuer.build()
+    const issuer = await Diip.build()
     return new IssuerInquirer(issuer)
   }
 
@@ -38,6 +47,15 @@ export class IssuerInquirer extends BaseInquirer {
       case PromptOptions.CreateCredentialOffer:
         await this.createCredentialOffer()
         break
+      case PromptOptions.CreateVerificationRequestMdoc:
+        await this.createStartupVerificationRequestMdoc()
+        break
+      case PromptOptions.CreateVerificationRequestSdjwt:
+        await this.createStartupVerificationRequestSdjwt()
+        break
+      case PromptOptions.CreateVerificationRequestMdocPex:
+        await this.createStartupVerificationRequestMdocPex()
+        break
       case PromptOptions.Exit:
         await this.exit()
         break
@@ -46,6 +64,48 @@ export class IssuerInquirer extends BaseInquirer {
         return
     }
     await this.processAnswer()
+  }
+
+  public async createStartupCredentialOffer() {
+    const credentialConfigurationIds = Object.keys(credentialConfigurationsSupported)
+    const { credentialOffer } = await this.issuer.createCredentialOffer({
+      credentialConfigurationIds,
+      requireAuthorization: undefined,
+      requirePin: false,
+    })
+
+    console.log(purpleText(`credential offer: '${credentialOffer}'`, true))
+  }
+
+  public async createStartupVerificationRequestMdoc() {
+    if (!('createProofRequest' in this.issuer) || typeof (this.issuer as Diip).createProofRequest !== 'function') {
+      return
+    }
+    const proofRequest = await (this.issuer as Diip).createProofRequest({
+      dcql: verificationDcql,
+    })
+    console.log(purpleText(`Verification request (DCQL): '${proofRequest}'`, true))
+  }
+
+  public async createStartupVerificationRequestMdocPex() {
+    if (!('createProofRequest' in this.issuer) || typeof (this.issuer as Diip).createProofRequest !== 'function') {
+      return
+    }
+    const proofRequest = await (this.issuer as Diip).createProofRequest({
+      // dcql: verificationDcql,
+      presentationDefinition: pidPex,
+      version: 'v1.draft21'
+    })
+    console.log(purpleText(`Verification request (DIF presentation definition): '${proofRequest}'`, true))
+  }
+  public async createStartupVerificationRequestSdjwt() {
+    if (!('createProofRequest' in this.issuer) || typeof (this.issuer as Diip).createProofRequest !== 'function') {
+      return
+    }
+    const proofRequest = await (this.issuer as Diip).createProofRequest({
+      dcql: verificationDcqlSdjwt,
+    })
+    console.log(purpleText(`Verification request (DCQL): '${proofRequest}'`, true))
   }
 
   public async createCredentialOffer() {

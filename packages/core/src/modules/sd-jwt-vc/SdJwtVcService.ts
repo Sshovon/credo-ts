@@ -105,7 +105,7 @@ export interface VerificationResult {
  */
 @injectable()
 export class SdJwtVcService {
-  public constructor(private sdJwtVcRepository: SdJwtVcRepository) {}
+  public constructor(private sdJwtVcRepository: SdJwtVcRepository) { }
 
   public async sign<Payload extends SdJwtVcPayload>(
     agentContext: AgentContext,
@@ -221,9 +221,9 @@ export class SdJwtVcService {
 
     const holder = holderBinding
       ? await extractKeyFromHolderBinding(agentContext, holderBinding, {
-          forSigning: true,
-          jwkKeyId: typeof sdJwtVc !== 'string' ? sdJwtVc.kmsKeyId : undefined,
-        })
+        forSigning: true,
+        jwkKeyId: typeof sdJwtVc !== 'string' ? sdJwtVc.kmsKeyId : undefined,
+      })
       : undefined
     sdjwt.config({
       kbSigner: holder ? getSdJwtSigner(agentContext, holder.publicJwk) : undefined,
@@ -233,13 +233,13 @@ export class SdJwtVcService {
     const compactDerivedSdJwtVc = await sdjwt.present(compactSdJwtVc, presentationFrame as PresentationFrame<Payload>, {
       kb: verifierMetadata
         ? {
-            payload: {
-              iat: verifierMetadata.issuedAt,
-              nonce: verifierMetadata.nonce,
-              aud: verifierMetadata.audience,
-              ...additionalPayload,
-            },
-          }
+          payload: {
+            iat: verifierMetadata.issuedAt,
+            nonce: verifierMetadata.nonce,
+            aud: verifierMetadata.audience,
+            ...additionalPayload,
+          },
+        }
         : undefined,
     })
 
@@ -271,16 +271,16 @@ export class SdJwtVcService {
     { compactSdJwtVc, keyBinding, requiredClaimKeys, fetchTypeMetadata, trustedCertificates, now }: SdJwtVcVerifyOptions
   ): Promise<
     | {
-        isValid: true
-        sdJwtVc: SdJwtVc<Header, Payload>
-        /**
-         * The full type metadata chain, can be used for further processing the type metadata.
-         *
-         * Only populated if `fetchTypeMetadata` is set to true, and the resolver returned a type
-         * metadata document.
-         */
-        typeMetadataChain?: NonEmptyArray<SdJwtVcTypeMetadata>
-      }
+      isValid: true
+      sdJwtVc: SdJwtVc<Header, Payload>
+      /**
+       * The full type metadata chain, can be used for further processing the type metadata.
+       *
+       * Only populated if `fetchTypeMetadata` is set to true, and the resolver returned a type
+       * metadata document.
+       */
+      typeMetadataChain?: NonEmptyArray<SdJwtVcTypeMetadata>
+    }
     | { isValid: false; sdJwtVc?: SdJwtVc<Header, Payload>; error: Error }
   > {
     const sdjwt = new SDJwtVcInstance({
@@ -311,9 +311,9 @@ export class SdJwtVcService {
 
       kbJwt: sdJwtVc.kbJwt
         ? {
-            payload: sdJwtVc.kbJwt.payload as Record<string, unknown>,
-            header: sdJwtVc.kbJwt.header as Record<string, unknown>,
-          }
+          payload: sdJwtVc.kbJwt.payload as Record<string, unknown>,
+          header: sdJwtVc.kbJwt.header as Record<string, unknown>,
+        }
         : undefined,
       claimFormat: ClaimFormat.SdJwtDc,
       encoded: compactSdJwtVc,
@@ -651,36 +651,59 @@ export class SdJwtVcService {
     }
   }
 
+  /**
+   * Resolve issuer to a fetchable JWKS URL. did:web is converted to HTTPS per the spec
+   * (did:web:domain:path -> https://domain/path). Other issuers (e.g. https) are used as-is.
+   */
+  private statusListIssuerToJwksUrl(iss: string): string {
+    if (typeof iss !== 'string') return `${iss}/.well-known/jwks.json`
+    if (iss.startsWith('did:web:')) {
+      const methodSpecificId = iss.slice('did:web:'.length)
+      const path = methodSpecificId.replace(/:/g, '/')
+      return `https://${path}/.well-known/jwks.json`
+    }
+    const base = iss.endsWith('/') ? iss.slice(0, -1) : iss
+    return `${base}/.well-known/jwks.json`
+  }
+
+  /**
+   * Status list JWT verifier used by @sd-jwt/sd-jwt-vc.
+   * When this returns false, @sd-jwt/core throws SDJWTException("Verify Error: Invalid JWT Signature"),
+   * which @sd-jwt/sd-jwt-vc wraps as SLException("Status List JWT verification failed: ...").
+   */
   private getStatusVerifier(agentContext: AgentContext) {
     return async (data: string, sig: string) => {
       const jwt = Jwt.fromSerializedJwt(`${data}.${sig}`)
       const payload = jwt.payload
+      const jwksUrl = this.statusListIssuerToJwksUrl(payload.iss as string)
+      agentContext.config.logger.debug(`Fetching JWKS from ${jwksUrl}`)
       const jwksResponse = await fetchWithTimeout(
         agentContext.config.agentDependencies.fetch,
-        `${payload.iss}/.well-known/jwks.json`
+        jwksUrl
       )
       if (!jwksResponse.ok) {
         agentContext.config.logger.error(
-          `Received invalid response with status ${
-            jwksResponse.status
-          } when fetching JWKS from ${payload.iss}/.well-known/jwks.json. ${await jwksResponse.text()}`
+          `Received invalid response with status ${jwksResponse.status
+          } when fetching JWKS from ${jwksUrl}. ${await jwksResponse.text()}`
         )
         return false
       }
       const jwks = (await jwksResponse.json()) as Record<'keys', Jwk[]>
+      agentContext.config.logger.debug(`JWKS keys: ${JSON.stringify(jwks.keys)}`)
       // TODO: we can check all keys against the signature incase kid is not present in the header
       const signingJwk = jwks.keys.find((jwk) => jwk.kid === jwt.header.kid)
       if (!signingJwk) {
-        agentContext.config.logger.error(`No JWK found for kid ${jwt.header.kid} in JWKS from ${payload.iss}/.well-known/jwks.json`)
+        agentContext.config.logger.error(`No JWK found for kid ${jwt.header.kid} in JWKS from ${jwksUrl}`)
         return false
       }
+      agentContext.config.logger.debug(`Signing JWK: ${JSON.stringify(signingJwk)}`)
       const { isValid } = await agentContext.resolve(JwsService).verifyJws(agentContext, {
         jws: jwt.serializedJwt,
         jwsSigner: {
           method: 'jwk',
           jwk: PublicJwk.fromUnknown(signingJwk),
         },
-      })
+      })  
       agentContext.config.logger.debug(`Status list provider JWT signature verification result: ${isValid}`)
       return isValid
     }
@@ -696,8 +719,7 @@ export class SdJwtVcService {
 
       if (!response.ok) {
         throw new CredoError(
-          `Received invalid response with status ${
-            response.status
+          `Received invalid response with status ${response.status
           } when fetching status list from ${uri}. ${await response.text()}`
         )
       }

@@ -168,6 +168,7 @@ export class JwsService {
       signatures,
       payload,
     } satisfies JwsFlattenedFormat
+    agentContext.config.logger.debug(`JWS flattened: ${JSON.stringify(jwsFlattened)}`)
 
     const jwsSigners: JwsSignerWithJwk[] = []
     for (const jws of signatures) {
@@ -177,6 +178,7 @@ export class JwsService {
         throw new CredoError('Unable to verify JWS, protected header is not a valid JSON object.')
       }
 
+      agentContext.config.logger.debug(`Protected JSON: ${JSON.stringify(protectedJson)}`)
       if (!protectedJson.alg || typeof protectedJson.alg !== 'string') {
         throw new CredoError('Unable to verify JWS, protected header alg is not provided or not a string.')
       }
@@ -210,7 +212,10 @@ export class JwsService {
       jwsSigners.push(jwsSigner)
 
       const kms = agentContext.dependencyManager.resolve(KeyManagementApi)
-
+      agentContext.config.logger.debug(`Verifying signature with KMS: ${JSON.stringify(jwsSigner.jwk.toJson())}`)
+      agentContext.config.logger.debug(`Data: ${JSON.stringify(data)}`)
+      agentContext.config.logger.debug(`Signature: ${JSON.stringify(signature)}`)
+      agentContext.config.logger.debug(`Algorithm: ${JSON.stringify(protectedJson.alg)}`)
       try {
         const { verified } = await kms.verify({
           key: {
