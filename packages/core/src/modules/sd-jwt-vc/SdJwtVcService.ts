@@ -15,7 +15,7 @@ import { dateToSeconds, IntegrityVerifier, nowInSeconds, TypedArrayEncoder } fro
 import { getDomainFromUrl } from '../../utils/domain'
 import { fetchWithTimeout } from '../../utils/fetch'
 import { getPublicJwkFromVerificationMethod, parseDid } from '../dids'
-import { KeyManagementApi, PublicJwk, type Jwk } from '../kms'
+import { type Jwk, KeyManagementApi, PublicJwk } from '../kms'
 import { ClaimFormat } from '../vc/index'
 import { type EncodedX509Certificate, X509Certificate, X509ModuleConfig } from '../x509'
 import { decodeSdJwtVc, sdJwtVcHasher } from './decodeSdJwtVc'
@@ -651,29 +651,44 @@ export class SdJwtVcService {
     }
   }
 
+  /**
+   * Resolve issuer to a fetchable JWKS URL. did:web is converted to HTTPS per the spec
+   * (did:web:domain:path -> https://domain/path). Other issuers (e.g. https) are used as-is.
+   */
+  private statusListIssuerToJwksUrl(iss: string): string {
+    if (iss.startsWith('did:web:')) {
+      const methodSpecificId = iss.slice('did:web:'.length)
+      const path = methodSpecificId.replace(/:/g, '/')
+      return `https://${path}/.well-known/jwks.json`
+    }
+    const base = iss.endsWith('/') ? iss.slice(0, -1) : iss
+    return `${base}/.well-known/jwks.json`
+  }
+  
   private getStatusVerifier(agentContext: AgentContext) {
     return async (data: string, sig: string) => {
       const jwt = Jwt.fromSerializedJwt(`${data}.${sig}`)
       const payload = jwt.payload
-      const jwksResponse = await fetchWithTimeout(
-        agentContext.config.agentDependencies.fetch,
-        `${payload.iss}/.well-known/jwks.json`
-      )
+      const jwksUrl = this.statusListIssuerToJwksUrl(payload.iss as string)
+      agentContext.config.logger.debug(`Fetching JWKS from ${jwksUrl}`)
+      const jwksResponse = await fetchWithTimeout(agentContext.config.agentDependencies.fetch, jwksUrl)
       if (!jwksResponse.ok) {
         agentContext.config.logger.error(
           `Received invalid response with status ${
             jwksResponse.status
-          } when fetching JWKS from ${payload.iss}/.well-known/jwks.json. ${await jwksResponse.text()}`
+          } when fetching JWKS from ${jwksUrl}. ${await jwksResponse.text()}`
         )
         return false
       }
       const jwks = (await jwksResponse.json()) as Record<'keys', Jwk[]>
+      agentContext.config.logger.debug(`JWKS keys: ${JSON.stringify(jwks.keys)}`)
       // TODO: we can check all keys against the signature incase kid is not present in the header
       const signingJwk = jwks.keys.find((jwk) => jwk.kid === jwt.header.kid)
       if (!signingJwk) {
-        agentContext.config.logger.error(`No JWK found for kid ${jwt.header.kid} in JWKS from ${payload.iss}/.well-known/jwks.json`)
+        agentContext.config.logger.error(`No JWK found for kid ${jwt.header.kid} in JWKS from ${jwksUrl}`)
         return false
       }
+      agentContext.config.logger.debug(`Signing JWK: ${JSON.stringify(signingJwk)}`)
       const { isValid } = await agentContext.resolve(JwsService).verifyJws(agentContext, {
         jws: jwt.serializedJwt,
         jwsSigner: {

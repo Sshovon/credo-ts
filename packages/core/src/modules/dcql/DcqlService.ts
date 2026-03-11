@@ -771,10 +771,9 @@ export class DcqlService {
                   failureReasons.push(`Meta validation failed: ${JSON.stringify(failedCredential.meta.issues)}`)
                 }
                 if (!failedCredential.claims.success && failedCredential.claims.failed_claim_sets) {
-                  const claimIssues = failedCredential.claims.failed_claim_sets
-                    .flatMap((cs) =>
-                      Object.entries(cs.issues || {}).map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
-                    )
+                  const claimIssues = failedCredential.claims.failed_claim_sets.flatMap((cs) =>
+                    Object.entries(cs.issues || {}).map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
+                  )
                   failureReasons.push(`Claims validation failed: ${claimIssues.join(', ')}`)
                 }
                 if (!failedCredential.trusted_authorities.success) {
@@ -817,8 +816,7 @@ export class DcqlService {
           })
 
           const validOptionMatches = optionMatches.filter(
-            (c): c is { match: DcqlValidCredential; credentialQueryId: string } =>
-              c !== undefined && 'match' in c
+            (c): c is { match: DcqlValidCredential; credentialQueryId: string } => c !== undefined && 'match' in c
           )
 
           // If all queries in this option matched, use this option
@@ -876,10 +874,9 @@ export class DcqlService {
               failureReasons.push(`Meta validation failed: ${JSON.stringify(failedCredential.meta.issues)}`)
             }
             if (!failedCredential.claims.success && failedCredential.claims.failed_claim_sets) {
-              const claimIssues = failedCredential.claims.failed_claim_sets
-                .flatMap((cs) =>
-                  Object.entries(cs.issues || {}).map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
-                )
+              const claimIssues = failedCredential.claims.failed_claim_sets.flatMap((cs) =>
+                Object.entries(cs.issues || {}).map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
+              )
               failureReasons.push(`Claims validation failed: ${claimIssues.join(', ')}`)
             }
             if (!failedCredential.trusted_authorities.success) {
@@ -891,9 +888,7 @@ export class DcqlService {
             )
           }
 
-          const availableIds = credentialMatch.valid_credentials
-            .map((m: DcqlValidCredential) => m.record.id)
-            .join(', ')
+          const availableIds = credentialMatch.valid_credentials.map((m: DcqlValidCredential) => m.record.id).join(', ')
           throw new DcqlError(
             `Unable to find credential with id '${credentialId}' for credential query id '${credentialQuery.id}'. Available credential IDs: ${availableIds || 'none'}`
           )
