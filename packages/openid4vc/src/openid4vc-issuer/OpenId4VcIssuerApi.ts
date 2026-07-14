@@ -133,4 +133,13 @@ export class OpenId4VcIssuerApi {
   public async getIssuanceSessionById(issuanceSessionId: string) {
     return this.openId4VcIssuerService.getIssuanceSessionById(this.agentContext, issuanceSessionId)
   }
+
+  /**
+   * Delete an issuance session by id.
+   *
+   * @throws {RecordNotFoundError} if no issuance session with the given id exists
+   */
+  public async deleteIssuanceSessionById(issuanceSessionId: string) {
+    return this.openId4VcIssuerService.deleteIssuanceSessionById(this.agentContext, issuanceSessionId)
+  }
 }

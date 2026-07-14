@@ -1,27 +1,57 @@
-import { Jwt } from '@credo-ts/core'
+import { Jwt, RecordNotFoundError, utils } from '@credo-ts/core'
 import { InMemoryWalletModule } from '../../../../../tests/InMemoryWalletModule'
 import { type AgentType, createAgentFromModules } from '../../../tests/utils'
-import { universityDegreePresentationDefinition } from '../../../tests/utilsVp'
+import { universityDegreeDcqlQuery, universityDegreePresentationDefinition } from '../../../tests/utilsVp'
 import { OpenId4VcModule } from '../../OpenId4VcModule'
 
-const modules = {
-  openid4vc: new OpenId4VcModule({
-    verifier: {
-      baseUrl: 'http://redirect-uri',
-    },
-  }),
-  inMemory: new InMemoryWalletModule(),
-}
+const createModules = () =>
+  ({
+    openid4vc: new OpenId4VcModule({
+      verifier: {
+        baseUrl: 'http://redirect-uri',
+      },
+    }),
+    inMemory: new InMemoryWalletModule(),
+  }) as const
 
 describe('OpenId4VcVerifier', () => {
-  let verifier: AgentType<typeof modules>
+  let verifier: AgentType<ReturnType<typeof createModules>>
 
   beforeEach(async () => {
-    verifier = await createAgentFromModules(modules, '96213c3d7fc8d4d6754c7a0fd969598f')
+    verifier = await createAgentFromModules(createModules(), '96213c3d7fc8d4d6754c7a0fd969598f')
   })
 
   afterEach(async () => {
     await verifier.agent.shutdown()
+  })
+
+  describe('deleteVerificationSessionById', () => {
+    it('deletes a verification session by id', async () => {
+      const openIdVerifier = await verifier.agent.openid4vc.verifier.createVerifier()
+      const { verificationSession } = await verifier.agent.openid4vc.verifier.createAuthorizationRequest({
+        requestSigner: {
+          method: 'did',
+          didUrl: verifier.kid,
+        },
+        verifierId: openIdVerifier.verifierId,
+        dcql: {
+          query: universityDegreeDcqlQuery,
+        },
+        version: 'v1.draft24',
+      })
+
+      await verifier.agent.openid4vc.verifier.deleteVerificationSessionById(verificationSession.id)
+
+      await expect(
+        verifier.agent.openid4vc.verifier.getVerificationSessionById(verificationSession.id)
+      ).rejects.toThrow(RecordNotFoundError)
+    })
+
+    it('throws RecordNotFoundError when deleting a non-existent verification session', async () => {
+      await expect(verifier.agent.openid4vc.verifier.deleteVerificationSessionById(utils.uuid())).rejects.toThrow(
+        RecordNotFoundError
+      )
+    })
   })
 
   describe('Verification', () => {

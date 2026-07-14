@@ -917,6 +917,10 @@ export class OpenId4VpVerifierService {
     return this.openId4VcVerificationSessionRepository.getById(agentContext, verificationSessionId)
   }
 
+  public async deleteVerificationSessionById(agentContext: AgentContext, verificationSessionId: string) {
+    await this.openId4VcVerificationSessionRepository.deleteById(agentContext, verificationSessionId)
+  }
+
   private async getClientMetadata(
     agentContext: AgentContext,
     options: {

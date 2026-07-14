@@ -65,6 +65,15 @@ export class OpenId4VcVerifierApi {
   }
 
   /**
+   * Delete a verification session by id.
+   *
+   * @throws {RecordNotFoundError} if no verification session with the given id exists
+   */
+  public async deleteVerificationSessionById(verificationSessionId: string) {
+    return this.openId4VpVerifierService.deleteVerificationSessionById(this.agentContext, verificationSessionId)
+  }
+
+  /**
    * Create an OpenID4VP authorization request, acting as a Relying Party (RP).
    *
    * See {@link OpenId4VpCreateAuthorizationRequestOptions} for detailed documentation on the options.

@@ -11,6 +11,7 @@ import {
   asArray,
   CredoError,
   DidKey,
+  RecordNotFoundError,
   DidsApi,
   equalsIgnoreOrder,
   JsonTransformer,
@@ -1094,5 +1095,29 @@ describe('OpenId4VcIssuer', () => {
     })
 
     await handleCredentialResponse(holder.context, credentialResponse2.credential, universityDegreeCredential)
+  })
+
+  describe('deleteIssuanceSessionById', () => {
+    it('deletes an issuance session by id', async () => {
+      const { issuanceSession } = await issuer.openid4vc.issuer.createCredentialOffer({
+        issuerId: openId4VcIssuer.issuerId,
+        credentialConfigurationIds: [universityDegreeCredentialSdJwt.id],
+        preAuthorizedCodeFlowConfig: {
+          preAuthorizedCode: '1234567890',
+        },
+      })
+
+      await issuer.openid4vc.issuer.deleteIssuanceSessionById(issuanceSession.id)
+
+      await expect(issuer.openid4vc.issuer.getIssuanceSessionById(issuanceSession.id)).rejects.toThrow(
+        RecordNotFoundError
+      )
+    })
+
+    it('throws RecordNotFoundError when deleting a non-existent issuance session', async () => {
+      await expect(issuer.openid4vc.issuer.deleteIssuanceSessionById(utils.uuid())).rejects.toThrow(
+        RecordNotFoundError
+      )
+    })
   })
 })
