@@ -13,7 +13,7 @@ import { dateToSeconds, IntegrityVerifier, JsonEncoder, nowInSeconds, TypedArray
 import { getDomainFromUrl } from '../../utils/domain'
 import { fetchWithTimeout } from '../../utils/fetch'
 import { getPublicJwkFromVerificationMethod, parseDid } from '../dids'
-import { KeyManagementApi, PublicJwk } from '../kms'
+import { type Jwk, KeyManagementApi, PublicJwk } from '../kms'
 import { ClaimFormat } from '../vc/index'
 import { X509Certificate, X509ModuleConfig, X509Service } from '../x509'
 import { legacyTrustedCertificatesToTrustedIssuers } from '../x509/utils/convertLegacyTrustedCertificates'
@@ -696,8 +696,17 @@ export class SdJwtVcService {
       }
 
       // No matched trusted issuer (e.g. did default-allow path with no configured trusted issuers).
-      // Preserve the previous behavior of verifying the status list with the credential issuer key.
+      // Try JWKS first, then fall back to verifying the status list with the credential issuer key.
       if (!matchedTrustedIssuer) {
+        try {
+          const isValid = await this.verifyStatusListWithJwks(agentContext, data, signatureBase64Url, header)
+          if (isValid) return true
+        } catch (error) {
+          agentContext.config.logger.debug('Status list JWKS verification failed, falling back to credential issuer key', {
+            error,
+          })
+        }
+        
         // Copy the jwk, so the alg of the status list does not affect verification of the credential itself
         const signerJwk = PublicJwk.fromUnknown(credentialIssuerKey.toJson())
         setJwkAlgFromJwtHeader(signerJwk, header.alg)
@@ -782,6 +791,39 @@ export class SdJwtVcService {
       setJwkAlgFromJwtHeader(publicJwk, header.alg)
       return getSdJwtVerifier(agentContext, publicJwk)(data, signatureBase64Url)
     }
+  }
+
+  // Fetch `{iss}/.well-known/jwks.json` and verify by `kid`.
+  private async verifyStatusListWithJwks(
+    agentContext: AgentContext,
+    data: string,
+    signatureBase64Url: string,
+    header: { alg?: string; kid?: string }
+  ): Promise<boolean> {
+    const iss = JsonEncoder.fromBase64Url(data.split('.')[1]).iss
+    if (typeof iss !== 'string' || !header.kid) {
+      throw new SdJwtVcError('Unable to verify status list with JWKS: missing `iss` or `kid`.')
+    }
+    if (!iss.startsWith('https://')) {
+      throw new SdJwtVcError('Unable to verify status list with JWKS: `iss` must be an https URL.')
+    }
+
+    const base = iss.endsWith('/') ? iss.slice(0, -1) : iss
+    const jwksUrl = `${base}/.well-known/jwks.json`
+    const jwksResponse = await fetchWithTimeout(agentContext.config.agentDependencies.fetch, jwksUrl)
+    if (!jwksResponse.ok) {
+      throw new SdJwtVcError(`Failed to fetch JWKS from ${jwksUrl}`)
+    }
+
+    const jwks = (await jwksResponse.json()) as { keys?: Jwk[] }
+    const signingJwk = jwks.keys?.find((jwk) => jwk.kid === header.kid)
+    if (!signingJwk) {
+      throw new SdJwtVcError(`No JWK found for kid '${header.kid}' in JWKS from ${jwksUrl}`)
+    }
+
+    const signerJwk = PublicJwk.fromUnknown(signingJwk)
+    setJwkAlgFromJwtHeader(signerJwk, header.alg)
+    return getSdJwtVerifier(agentContext, signerJwk)(data, signatureBase64Url)
   }
 
   private getVctFetcher(

@@ -48,6 +48,13 @@ export class W3cV2CredentialsApi {
     return this.w3cV2CredentialService.findCredentialsByQuery(this.agentContext, query, queryOptions)
   }
 
+  public async findAllRecordsByQuery(
+    query: Query<W3cV2CredentialRecord>,
+    queryOptions?: QueryOptions
+  ): Promise<W3cV2CredentialRecord[]> {
+    return this.w3cV2CredentialService.findCredentialRecordsByQuery(this.agentContext, query, queryOptions)
+  }
+
   public async signCredential<Format extends ClaimFormat.JwtW3cVc | ClaimFormat.SdJwtW3cVc>(
     options: W3cV2SignCredentialOptions<Format>
   ) {
