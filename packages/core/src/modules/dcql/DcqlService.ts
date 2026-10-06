@@ -80,13 +80,24 @@ export interface DcqlSelectCredentialsForRequestOptions {
 
 export interface DcqlSelectCredentialsForRequestByIdOptions extends DcqlSelectCredentialsForRequestOptions {
   /**
-   * The credential record ID to use for all credential queries.
-   * The credential record ID should match the `id` property of the credential record.
+   * The credential records to present, each for a credential query of the dcql query.
    *
-   * For multi-credential requests, this id must be a valid match for every required
-   * credential query. Otherwise a {@link DcqlError} is thrown listing the unmatched queries.
+   * A credential query without a selected credential record is auto-selected, as
+   * `selectCredentialsForRequest` does. With credential sets, the selected credential records
+   * determine which option of a required credential set is presented. Optional credential sets
+   * are never presented, so no credential record can be selected for them.
    */
-  credentialId: string
+  credentials: Array<{
+    /**
+     * The `id` of the credential query in the dcql query.
+     */
+    dcqlCredentialId: string
+
+    /**
+     * The `id` of the credential record to present for the credential query.
+     */
+    credentialRecordId: string
+  }>
 }
 
 @injectable()
@@ -784,24 +795,51 @@ export class DcqlService {
 
   /**
    * Selects the credentials to use based on the output from `getCredentialsForRequest`
-   * and a credential ID. This method allows you to specify which specific credential
-   * record to use by its record ID.
+   * and the credential records selected for the credential queries, by the `id` of the
+   * credential query in the dcql query and the `id` of the credential record.
    *
-   * The same `credentialId` must match every required credential query. For
-   * multi-credential requests, if the id does not match any required query, an error
-   * is thrown listing the unmatched queries.
+   * Credential queries without a selected credential record are auto-selected.
    *
-   * @throws {DcqlError} If the request cannot be satisfied or if the specified credentialId doesn't match any valid credential
+   * @throws {DcqlError} If the request cannot be satisfied, a selected credential record is not valid
+   * for its credential query, or the credential query of a selected credential record is not presented.
    */
   public selectCredentialsForRequestById(
     dcqlQueryResult: DcqlQueryResult,
-    { useMode = CredentialMultiInstanceUseMode.NewOrFirst, credentialId }: DcqlSelectCredentialsForRequestByIdOptions
+    {
+      useMode = CredentialMultiInstanceUseMode.NewOrFirst,
+      credentials: selectedCredentials,
+    }: DcqlSelectCredentialsForRequestByIdOptions
   ): DcqlCredentialsForRequest {
     if (!dcqlQueryResult.can_be_satisfied) {
       throw new DcqlError(
         'Cannot select the credentials for the dcql query presentation if the request cannot be satisfied'
       )
     }
+
+    const dcqlCredentialIds = dcqlQueryResult.credentials.map((credentialQuery) => credentialQuery.id)
+    const credentialRecordIds = new Map<string, string>()
+
+    for (const { dcqlCredentialId, credentialRecordId } of selectedCredentials) {
+      if (!dcqlCredentialIds.includes(dcqlCredentialId)) {
+        throw new DcqlError(
+          `DCQL credential id '${dcqlCredentialId}' is not present in the dcql query. Available DCQL credential ids: ${dcqlCredentialIds.join(', ')}`
+        )
+      }
+
+      if (credentialRecordIds.has(dcqlCredentialId)) {
+        throw new DcqlError(`More than one credential record selected for DCQL credential id '${dcqlCredentialId}'`)
+      }
+
+      credentialRecordIds.set(dcqlCredentialId, credentialRecordId)
+    }
+
+    const resolveCredential = (dcqlCredentialId: string) =>
+      this.resolveCredentialForRequestById({
+        credentialMatch: dcqlQueryResult.credential_matches[dcqlCredentialId],
+        dcqlCredentialId,
+        credentialRecordId: credentialRecordIds.get(dcqlCredentialId),
+        useMode,
+      })
 
     const credentials: DcqlCredentialsForRequest = {}
 
@@ -815,131 +853,121 @@ export class DcqlService {
           throw new DcqlError('Invalid dcql query result. No option is fullfillable')
         }
 
+        // The options with the most selected credential records first, so the selection determines the option
+        const selectedCount = (option: string[]) => option.filter((id) => credentialRecordIds.has(id)).length
+        const sortedOptions = [...fullfillableOptions].sort((a, b) => selectedCount(b) - selectedCount(a))
+
         const allOptionErrors: Array<{ option: string[]; errors: string[] }> = []
 
-        for (const fullfillableOption of fullfillableOptions) {
-          const optionMatches = fullfillableOption.map((credentialQueryId) => {
-            const resolved = this.resolveCredentialForRequestById({
-              credentialMatch: dcqlQueryResult.credential_matches[credentialQueryId],
-              credentialQueryId,
-              credentialId,
-              useMode,
-            })
+        for (const fullfillableOption of sortedOptions) {
+          const optionMatches = fullfillableOption.map((dcqlCredentialId) => ({
+            dcqlCredentialId,
+            resolved: resolveCredential(dcqlCredentialId),
+          }))
 
-            if ('error' in resolved) {
-              return { error: resolved.error }
+          const errors = optionMatches.flatMap(({ resolved }) => ('error' in resolved ? [resolved.error] : []))
+          if (errors.length > 0) {
+            // A selected credential record that is not valid is never replaced by another option
+            if (selectedCount(fullfillableOption) > 0) {
+              throw new DcqlError(
+                `Unable to select credentials for credential set option [${fullfillableOption.join(', ')}].\n${errors.join('\n')}`
+              )
             }
 
-            return {
-              match: resolved.match,
-              credentialQueryId,
-            }
-          })
-
-          const validOptionMatches = optionMatches.filter(
-            (c): c is { match: DcqlValidCredential; credentialQueryId: string } => 'match' in c
-          )
-
-          if (validOptionMatches.length === optionMatches.length && validOptionMatches.length > 0) {
-            for (const { match, credentialQueryId } of validOptionMatches) {
-              credentials[credentialQueryId] = [this.dcqlCredentialForRequestForValidCredential(match)]
-            }
-
-            continue credentialSetLoop
+            allOptionErrors.push({ option: fullfillableOption, errors })
+            continue
           }
 
-          const optionErrors = optionMatches.filter((c): c is { error: string } => 'error' in c).map((c) => c.error)
-          if (optionErrors.length > 0) {
-            allOptionErrors.push({
-              option: fullfillableOption,
-              errors: optionErrors,
-            })
+          for (const { dcqlCredentialId, resolved } of optionMatches) {
+            if ('error' in resolved) continue
+            credentials[dcqlCredentialId] = [this.dcqlCredentialForRequestForValidCredential(resolved.match)]
           }
+
+          continue credentialSetLoop
         }
 
         const errorMessages = allOptionErrors
           .map(({ option, errors }) => `Option [${option.join(', ')}]: ${errors.join('; ')}`)
           .join('\n')
 
+        throw new DcqlError(`Unable to select credentials for credential set.\n${errorMessages}`)
+      }
+
+      for (const [dcqlCredentialId, credentialRecordId] of credentialRecordIds) {
+        if (credentials[dcqlCredentialId]) continue
+
+        const resolved = resolveCredential(dcqlCredentialId)
+        if ('error' in resolved) throw new DcqlError(resolved.error)
+
         throw new DcqlError(
-          `Unable to select credentials for credential set. Credential with id '${credentialId}' does not match any of the available options.\n${errorMessages}`
+          `Credential record with id '${credentialRecordId}' is selected for DCQL credential id '${dcqlCredentialId}', which is not presented. ` +
+            'It is part of an optional credential set, of an option that is not presented because credential records are selected for another option, or of no credential set. ' +
+            `Presented DCQL credential ids: ${Object.keys(credentials).join(', ') || 'none'}`
         )
       }
     } else {
-      const matchedQueryIds: string[] = []
-      const unmatchedQueryErrors: Array<{ credentialQueryId: string; error: string }> = []
-      const resolvedMatches: Array<{ credentialQueryId: string; match: DcqlValidCredential }> = []
+      const errors: string[] = []
 
-      for (const credentialQuery of dcqlQueryResult.credentials) {
-        const resolved = this.resolveCredentialForRequestById({
-          credentialMatch: dcqlQueryResult.credential_matches[credentialQuery.id],
-          credentialQueryId: credentialQuery.id,
-          credentialId,
-          useMode,
-        })
+      for (const dcqlCredentialId of dcqlCredentialIds) {
+        const resolved = resolveCredential(dcqlCredentialId)
 
         if ('error' in resolved) {
-          unmatchedQueryErrors.push({ credentialQueryId: credentialQuery.id, error: resolved.error })
+          errors.push(resolved.error)
           continue
         }
 
-        matchedQueryIds.push(credentialQuery.id)
-        resolvedMatches.push({ credentialQueryId: credentialQuery.id, match: resolved.match })
+        credentials[dcqlCredentialId] = [this.dcqlCredentialForRequestForValidCredential(resolved.match)]
       }
 
-      if (unmatchedQueryErrors.length > 0) {
-        const isMultiCredential = dcqlQueryResult.credentials.length > 1
-        const unmatchedDetails = unmatchedQueryErrors
-          .map(({ credentialQueryId, error }) => `- ${credentialQueryId}: ${error}`)
-          .join('\n')
-
-        if (isMultiCredential) {
-          throw new DcqlError(
-            `Credential with id '${credentialId}' does not match all credential queries in this multi-credential request. ` +
-              `Matched queries: [${matchedQueryIds.join(', ') || 'none'}]. ` +
-              `Unmatched queries:\n${unmatchedDetails}`
-          )
-        }
-
-        throw new DcqlError(unmatchedQueryErrors[0].error)
-      }
-
-      for (const { credentialQueryId, match } of resolvedMatches) {
-        credentials[credentialQueryId] = [this.dcqlCredentialForRequestForValidCredential(match)]
-      }
+      if (errors.length > 0) throw new DcqlError(errors.join('\n'))
     }
 
     return credentials
   }
 
   /**
-   * Resolves a single credential query match to the credential with the given record id.
-   * Returns either the matching valid credential, or an error describing why it cannot be used.
+   * Resolves the credential to present for a credential query: the credential record with the given
+   * id, or the first credential record that can be used when no id is given.
+   * Returns either the valid credential, or an error describing why it cannot be used.
    */
   private resolveCredentialForRequestById({
     credentialMatch,
-    credentialQueryId,
-    credentialId,
+    dcqlCredentialId,
+    credentialRecordId,
     useMode,
   }: {
     credentialMatch: DcqlQueryResult['credential_matches'][string]
-    credentialQueryId: string
-    credentialId: string
+    dcqlCredentialId: string
+    credentialRecordId?: string
     useMode: CredentialMultiInstanceUseMode
   }): { match: DcqlValidCredential } | { error: string } {
     if (!credentialMatch.success) {
       return {
-        error: `Invalid dcql query result for credential query id '${credentialQueryId}'. Credential with id '${credentialId}' cannot be selected because this query has no valid credentials`,
+        error: `Invalid dcql query result for DCQL credential id '${dcqlCredentialId}'. No credential record can be selected because it has no valid credentials`,
       }
     }
 
+    if (credentialRecordId === undefined) {
+      const match = credentialMatch.valid_credentials.find((m: DcqlValidCredential) =>
+        canUseInstanceFromCredentialRecord({ credentialRecord: m.record, useMode })
+      )
+
+      return match
+        ? { match }
+        : {
+            error: `Unable to select credential for DCQL credential id '${dcqlCredentialId}'. No new credential instance available on any of the available credentials.`,
+          }
+    }
+
+    const availableIds =
+      credentialMatch.valid_credentials.map((m: DcqlValidCredential) => m.record.id).join(', ') || 'none'
     const credentialWithId = credentialMatch.valid_credentials.find(
-      (m: DcqlValidCredential) => m.record.id === credentialId
+      (m: DcqlValidCredential) => m.record.id === credentialRecordId
     )
 
     if (!credentialWithId) {
       const failedCredential = credentialMatch.failed_credentials?.find(
-        (f: DcqlFailedCredential) => f.record.id === credentialId
+        (f: DcqlFailedCredential) => f.record.id === credentialRecordId
       )
 
       if (failedCredential) {
@@ -958,30 +986,22 @@ export class DcqlService {
         }
 
         return {
-          error: `Credential with id '${credentialId}' exists but does not match the requirements for credential query id '${credentialQueryId}'. ${failureReasons.join('; ')}. Available valid credential IDs: ${credentialMatch.valid_credentials.map((m: DcqlValidCredential) => m.record.id).join(', ') || 'none'}`,
+          error: `Credential record with id '${credentialRecordId}' exists but does not match the requirements for DCQL credential id '${dcqlCredentialId}'. ${failureReasons.join('; ')}. Available valid credential record ids: ${availableIds}`,
         }
       }
 
-      const availableIds = credentialMatch.valid_credentials.map((m: DcqlValidCredential) => m.record.id).join(', ')
       return {
-        error: `Unable to find credential with id '${credentialId}' for credential query id '${credentialQueryId}'. Available credential IDs: ${availableIds || 'none'}`,
+        error: `Unable to find credential record with id '${credentialRecordId}' for DCQL credential id '${dcqlCredentialId}'. Available credential record ids: ${availableIds}`,
       }
     }
 
-    const match = canUseInstanceFromCredentialRecord({
-      credentialRecord: credentialWithId.record,
-      useMode,
-    })
-      ? credentialWithId
-      : undefined
-
-    if (!match) {
+    if (!canUseInstanceFromCredentialRecord({ credentialRecord: credentialWithId.record, useMode })) {
       return {
-        error: `Credential with id '${credentialId}' found for credential query id '${credentialQueryId}', but it does not match the use mode requirements. Current state: ${credentialWithId.record.multiInstanceState}, Use mode: ${useMode}, Available instances: ${credentialWithId.record.credentialInstances.length}`,
+        error: `Credential record with id '${credentialRecordId}' found for DCQL credential id '${dcqlCredentialId}', but it does not match the use mode requirements. Current state: ${credentialWithId.record.multiInstanceState}, Use mode: ${useMode}, Available instances: ${credentialWithId.record.credentialInstances.length}`,
       }
     }
 
-    return { match }
+    return { match: credentialWithId }
   }
 
   public validateDcqlQuery(dcqlQuery: DcqlQuery | DcqlQuery.Input | unknown): DcqlQuery {
