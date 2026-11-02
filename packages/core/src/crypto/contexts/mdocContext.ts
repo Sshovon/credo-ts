@@ -113,7 +113,12 @@ export const getMdocContext = (agentContext: AgentContext, { now }: { now?: Date
     x509: {
       getSubjectNameField: (input) => {
         const x509Certificate = X509Certificate.fromRawCertificate(input.certificate)
-        return x509Certificate.getSubjectNameField(input.field)
+        const values = x509Certificate.getSubjectNameField(input.field)
+        // HOVI TEMPORARY PATCH: document signer certificates created without a countryName fall back to the
+        // issuer's countryName, as the mdoc library did before @owf/mdoc. Remove once existing certificates
+        // are migrated, see docs/x509-missing-country-fallback.md
+        if (input.field === 'C' && values.length === 0) return x509Certificate.getIssuerNameField(input.field)
+        return values
       },
       getPublicKey: async (input) => {
         const certificate = X509Certificate.fromRawCertificate(input.certificate)

@@ -198,6 +198,14 @@ export class W3cCredentialService {
     return result.map((record) => record.firstCredential)
   }
 
+  public async findCredentialRecordsByQuery(
+    agentContext: AgentContext,
+    query: Query<W3cCredentialRecord>,
+    queryOptions?: QueryOptions
+  ): Promise<W3cCredentialRecord[]> {
+    return await this.w3cCredentialRepository.findByQuery(agentContext, query, queryOptions)
+  }
+
   public async findCredentialRecordByQuery(
     agentContext: AgentContext,
     query: Query<W3cCredentialRecord>
